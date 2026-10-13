@@ -1,0 +1,16 @@
+# dashboard/requirements-dashboard.txt
+# Install: pip install -r dashboard/requirements-dashboard.txt
+
+# Dashboard framework
+streamlit>=1.35.0
+
+# Charts
+plotly>=5.20.0
+
+# Data
+pandas>=2.0.0
+
+# Agent deps (re-listed so dashboard env is self-contained)
+langgraph>=0.2
+langchain-core>=0.3
+langchain-openai>=0.2
