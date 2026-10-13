@@ -1,15 +1,13 @@
 # agent.py — generated from Jira story TER-1219
-# FAQ Router LangGraph agent for AgentRuntime
 from __future__ import annotations
 
-import json
-import logging
 import os
+import logging
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, StateGraph
+from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
 try:
@@ -20,94 +18,92 @@ except ImportError:
 logger = logging.getLogger(__name__)
 app = AgentRuntimeApp()
 
-# ── LLM setup ────────────────────────────────────────────────────────────────
-LITELLM_BASE = os.getenv("LITELLM_BASE_URL")
-LITELLM_KEY = os.getenv("LITELLM_API_KEY", "sk-1234")
+# ── LLM setup ──────────────────────────────────────────────────────────────
+LITELLM_BASE  = os.getenv("LITELLM_BASE_URL")
+LITELLM_KEY   = os.getenv("LITELLM_API_KEY", "sk-1234")
 LITELLM_MODEL = os.getenv("LITELLM_MODEL")
+model_name    = LITELLM_MODEL or os.getenv("LLM_MODEL", "gpt-4o-mini")
 
-model_name = LITELLM_MODEL or os.getenv("LLM_MODEL", "gpt-4o-mini")
 llm_kwargs: dict = {"model": model_name}
 if LITELLM_BASE:
     llm_kwargs.update({"base_url": LITELLM_BASE, "api_key": LITELLM_KEY})
+
 llm = ChatOpenAI(**llm_kwargs)
 
-# ── FAQ knowledge base ────────────────────────────────────────────────────────
+# ── FAQ data (in-code, no external services) ────────────────────────────────
 FAQ_MAP: dict[str, list[dict[str, str]]] = {
     "billing": [
         {
             "q": "How do I update my payment method?",
-            "a": "You can update your payment method by navigating to Account Settings > Billing > "
-                 "Payment Methods and clicking 'Edit'. Changes take effect on your next billing cycle.",
+            "a": "Go to Account Settings → Billing → Payment Methods. "
+                 "Click 'Edit' next to your current method and enter the new details.",
         },
         {
             "q": "Why was I charged twice this month?",
-            "a": "Double charges are usually caused by a failed transaction retry. Please check your "
-                 "Billing History in your account dashboard. If the duplicate charge is confirmed, "
-                 "contact support@example.com and we will issue a refund within 3–5 business days.",
+            "a": "Double charges are usually caused by a failed payment retry. "
+                 "Please contact billing@support.example.com with your invoice number "
+                 "and we will issue a refund within 3–5 business days.",
         },
         {
             "q": "How do I cancel my subscription?",
-            "a": "To cancel your subscription, go to Account Settings > Billing > Subscription and click "
-                 "'Cancel Plan'. Your access continues until the end of the current billing period.",
+            "a": "You can cancel anytime from Account Settings → Billing → Subscription. "
+                 "Your access continues until the end of the current billing period.",
         },
     ],
     "account": [
         {
             "q": "How do I reset my password?",
-            "a": "Click 'Forgot Password' on the login page and enter your registered email address. "
-                 "You will receive a reset link within 2 minutes. The link expires after 30 minutes.",
+            "a": "Click 'Forgot Password' on the login page. "
+                 "A reset link will be sent to your registered email address.",
         },
         {
             "q": "How do I change my email address?",
-            "a": "Go to Account Settings > Profile > Contact Information. Enter your new email and "
-                 "click 'Verify'. A confirmation link will be sent to the new address before the change is applied.",
+            "a": "Navigate to Account Settings → Profile → Email. "
+                 "Enter your new email and verify it via the confirmation link we send.",
         },
         {
-            "q": "How do I delete my account?",
-            "a": "Account deletion is permanent. Go to Account Settings > Security > Delete Account. "
-                 "You will be asked to confirm your password. All data is removed within 30 days per our retention policy.",
+            "q": "How do I enable two-factor authentication?",
+            "a": "Go to Account Settings → Security → Two-Factor Authentication "
+                 "and follow the setup wizard. We support authenticator apps and SMS.",
         },
     ],
     "technical": [
         {
-            "q": "The app is not loading — what should I do?",
-            "a": "First, clear your browser cache and cookies, then try a hard refresh (Ctrl+Shift+R / Cmd+Shift+R). "
-                 "If the problem persists, try a different browser or disable browser extensions. "
-                 "Check our status page at status.example.com for any ongoing incidents.",
+            "q": "Why is the application running slowly?",
+            "a": "Try clearing your browser cache and cookies. "
+                 "If the issue persists, check our status page at status.example.com "
+                 "or contact technical support.",
         },
         {
-            "q": "How do I integrate the API with my application?",
-            "a": "Our REST API uses Bearer token authentication. Generate an API key in "
-                 "Account Settings > Developer > API Keys. Full documentation, SDKs, and "
-                 "code samples are available at docs.example.com/api.",
+            "q": "How do I integrate with your API?",
+            "a": "Full API documentation is available at docs.example.com/api. "
+                 "You will need an API key from Account Settings → Developer → API Keys.",
         },
         {
-            "q": "Why is my data export failing?",
-            "a": "Data exports larger than 100 MB are split into multiple files. Ensure you have "
-                 "sufficient disk space and a stable connection. If the export job shows 'Failed' "
-                 "in your dashboard, retry once; if it fails again, contact support with your export job ID.",
+            "q": "What browsers are supported?",
+            "a": "We support the two most recent versions of Chrome, Firefox, Edge, and Safari. "
+                 "Internet Explorer is not supported.",
         },
     ],
 }
 
-FALLBACK_TOPICS = "billing, account, or technical"
+KNOWN_TOPICS = list(FAQ_MAP.keys())  # ["billing", "account", "technical"]
 
-# ── State ─────────────────────────────────────────────────────────────────────
+# ── State ──────────────────────────────────────────────────────────────────
 class AgentState(TypedDict):
-    messages: Annotated[list, add_messages]
-    topic: str           # classified topic: billing | account | technical | fallback
-    confidence: float    # classifier confidence 0.0–1.0
-    answer: str          # assembled answer text
+    messages:   Annotated[list, add_messages]
+    topic:      str   # classified topic or "fallback"
+    confidence: float # classifier confidence 0.0–1.0
 
 
-# ── Message conversion ────────────────────────────────────────────────────────
+# ── Helper: convert runtime dicts to LangChain messages ───────────────────
 def to_lc_messages(messages: list) -> list[BaseMessage]:
     result: list[BaseMessage] = []
     for m in messages:
         if not isinstance(m, dict):
             result.append(HumanMessage(content=str(m)))
             continue
-        role = m.get("role", "user")
+        role    = m.get("role", "user")
         content = m.get("content", "")
         if role == "user":
             result.append(HumanMessage(content=content))
@@ -120,178 +116,163 @@ def to_lc_messages(messages: list) -> list[BaseMessage]:
     return result
 
 
-# ── Nodes ─────────────────────────────────────────────────────────────────────
+# ── Node 1: Classifier ─────────────────────────────────────────────────────
+CLASSIFIER_SYSTEM = """You are an intent classifier for a customer support FAQ system.
+Given a user question, determine which topic it belongs to from this fixed list:
+  - billing   : payment, invoices, charges, subscriptions, refunds
+  - account   : passwords, email, profile, security, two-factor authentication
+  - technical : application errors, API, integrations, browser support, performance
 
-CLASSIFIER_SYSTEM = """You are a question classifier for a customer support FAQ system.
-Given a user question, classify it into exactly one of these topics:
-  - billing   (payments, invoices, subscriptions, charges, refunds)
-  - account   (login, password, email, profile, account deletion)
-  - technical (app issues, API, integrations, data exports, errors)
-  - fallback  (anything that does not clearly fit the above)
+Respond with EXACTLY one line in this format (no other text):
+<topic> <confidence>
 
-Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
-{"topic": "<topic>", "confidence": <0.0-1.0>}"""
+Where:
+  <topic>      is one of: billing, account, technical, fallback
+  <confidence> is a float between 0.0 and 1.0
+
+If the question does not fit any topic well, use 'fallback'."""
 
 
-def classifier_node(state: AgentState) -> dict:
-    """Classify the user question into a topic with a confidence score."""
-    # Extract the latest user message
-    user_msg = ""
-    for m in reversed(state["messages"]):
-        content = m.content if isinstance(m, BaseMessage) else m.get("content", "")
-        role = getattr(m, "type", None) or (m.get("role") if isinstance(m, dict) else "human")
-        if role in ("human", "user"):
-            user_msg = content
-            break
+def classify_question(state: AgentState) -> dict:
+    """LLM-powered classifier: routes to billing / account / technical / fallback."""
+    user_message = state["messages"][-1].content
 
-    classification_messages = [
+    response = llm.invoke([
         SystemMessage(content=CLASSIFIER_SYSTEM),
-        HumanMessage(content=f"User question: {user_msg}"),
-    ]
+        HumanMessage(content=f"Question: {user_message}"),
+    ])
 
-    response = llm.invoke(classification_messages)
-    raw = response.content.strip()
+    raw = response.content.strip().lower()
+    parts = raw.split()
 
-    try:
-        parsed = json.loads(raw)
-        topic = parsed.get("topic", "fallback").lower()
-        confidence = float(parsed.get("confidence", 0.5))
-        if topic not in FAQ_MAP and topic != "fallback":
+    topic      = "fallback"
+    confidence = 0.0
+
+    if parts:
+        candidate = parts[0]
+        if candidate in KNOWN_TOPICS:
+            topic = candidate
+        elif candidate == "fallback":
             topic = "fallback"
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("Classifier returned non-JSON: %s", raw)
-        topic = "fallback"
-        confidence = 0.0
 
+    if len(parts) >= 2:
+        try:
+            confidence = float(parts[1])
+            confidence = max(0.0, min(1.0, confidence))
+        except ValueError:
+            confidence = 0.8 if topic != "fallback" else 0.0
+    elif topic != "fallback":
+        confidence = 0.8  # default when classifier omits the score
+
+    logger.info("Classified question as topic=%s confidence=%.2f", topic, confidence)
     return {"topic": topic, "confidence": confidence}
 
 
-def _find_best_faq_answer(topic: str, user_msg: str) -> str:
-    """Return the single most relevant FAQ answer for the topic.
-
-    Uses the LLM to pick the best match from the topic's FAQ entries.
-    """
-    entries = FAQ_MAP[topic]
-    options = "\n".join(
-        f"{i+1}. Q: {e['q']}\n   A: {e['a']}" for i, e in enumerate(entries)
+# ── Node 2-4: Topic answer nodes ───────────────────────────────────────────
+def _answer_from_faq(topic: str, question: str, confidence: float) -> str:
+    """Find the closest FAQ entry for a topic using the LLM."""
+    faq_entries = FAQ_MAP[topic]
+    faq_text = "\n".join(
+        f"{i+1}. Q: {e['q']}\n   A: {e['a']}"
+        for i, e in enumerate(faq_entries)
     )
-    pick_prompt = (
-        f"The user asked: \"{user_msg}\"\n\n"
-        f"Choose the most relevant FAQ answer from the list below and reply with ONLY the answer text:\n\n"
-        f"{options}"
+    prompt = (
+        f"The user asked: \"{question}\"\n\n"
+        f"Below are FAQ entries for the '{topic}' topic. "
+        f"Select the most relevant answer and return it verbatim, "
+        f"or combine entries if the question spans multiple items. "
+        f"If none match well, say so politely.\n\n"
+        f"{faq_text}"
     )
-    response = llm.invoke([HumanMessage(content=pick_prompt)])
-    return response.content.strip()
+    result = llm.invoke([HumanMessage(content=prompt)])
+    return result.content.strip()
 
 
-def billing_node(state: AgentState) -> dict:
-    """Return the most relevant billing FAQ answer."""
-    user_msg = _get_last_user_message(state)
-    answer = _find_best_faq_answer("billing", user_msg)
-    return {
-        "answer": answer,
-        "messages": [AIMessage(content=answer)],
-    }
+def answer_billing(state: AgentState) -> dict:
+    """Return an answer from the billing FAQ."""
+    question = state["messages"][-1].content
+    answer   = _answer_from_faq("billing", question, state["confidence"])
+    return {"messages": [AIMessage(content=answer)]}
 
 
-def account_node(state: AgentState) -> dict:
-    """Return the most relevant account FAQ answer."""
-    user_msg = _get_last_user_message(state)
-    answer = _find_best_faq_answer("account", user_msg)
-    return {
-        "answer": answer,
-        "messages": [AIMessage(content=answer)],
-    }
+def answer_account(state: AgentState) -> dict:
+    """Return an answer from the account FAQ."""
+    question = state["messages"][-1].content
+    answer   = _answer_from_faq("account", question, state["confidence"])
+    return {"messages": [AIMessage(content=answer)]}
 
 
-def technical_node(state: AgentState) -> dict:
-    """Return the most relevant technical FAQ answer."""
-    user_msg = _get_last_user_message(state)
-    answer = _find_best_faq_answer("technical", user_msg)
-    return {
-        "answer": answer,
-        "messages": [AIMessage(content=answer)],
-    }
+def answer_technical(state: AgentState) -> dict:
+    """Return an answer from the technical FAQ."""
+    question = state["messages"][-1].content
+    answer   = _answer_from_faq("technical", question, state["confidence"])
+    return {"messages": [AIMessage(content=answer)]}
 
 
-def fallback_node(state: AgentState) -> dict:
-    """Return a polite fallback response including the confidence score."""
+# ── Node 5: Fallback ───────────────────────────────────────────────────────
+def answer_fallback(state: AgentState) -> dict:
+    """Politely decline and hint at supported topics."""
     confidence = state.get("confidence", 0.0)
-    answer = (
-        f"I\'m sorry, I wasn\'t able to match your question to a known topic "
+    response = (
+        f"I'm sorry, I wasn't able to match your question to a known topic "
         f"(confidence: {confidence:.0%}). "
-        f"I can help with {FALLBACK_TOPICS} questions. "
-        f"Could you please rephrase your question or let me know which area you need help with?"
+        "I can help with **billing**, **account**, or **technical** questions. "
+        "Could you rephrase your question within one of those areas?"
     )
-    return {
-        "answer": answer,
-        "messages": [AIMessage(content=answer)],
-    }
+    return {"messages": [AIMessage(content=response)]}
 
 
-def _get_last_user_message(state: AgentState) -> str:
-    """Extract the latest user message text from state."""
-    for m in reversed(state["messages"]):
-        if isinstance(m, BaseMessage):
-            if m.type in ("human",):
-                return m.content
-        elif isinstance(m, dict):
-            if m.get("role") in ("user", "human"):
-                return m.get("content", "")
-    return ""
-
-
-# ── Routing ───────────────────────────────────────────────────────────────────
-def route_topic(state: AgentState) -> str:
-    """Route to the appropriate topic node based on the classifier output."""
+# ── Conditional router ─────────────────────────────────────────────────────
+def route_by_topic(state: AgentState) -> str:
+    """Return the node name to route to based on the classified topic."""
     topic = state.get("topic", "fallback")
-    if topic in ("billing", "account", "technical"):
-        return topic
-    return "fallback"
+    routes = {
+        "billing":   "billing",
+        "account":   "account",
+        "technical": "technical",
+    }
+    return routes.get(topic, "fallback")
 
 
-# ── Graph ─────────────────────────────────────────────────────────────────────
+# ── Graph ──────────────────────────────────────────────────────────────────
 def build_graph() -> StateGraph:
     g = StateGraph(AgentState)
 
-    g.add_node("classifier", classifier_node)
-    g.add_node("billing", billing_node)
-    g.add_node("account", account_node)
-    g.add_node("technical", technical_node)
-    g.add_node("fallback", fallback_node)
+    # Register nodes
+    g.add_node("classifier", classify_question)
+    g.add_node("billing",    answer_billing)
+    g.add_node("account",    answer_account)
+    g.add_node("technical",  answer_technical)
+    g.add_node("fallback",   answer_fallback)
 
+    # Entry point
     g.set_entry_point("classifier")
 
+    # Conditional routing after classification
     g.add_conditional_edges(
         "classifier",
-        route_topic,
+        route_by_topic,
         {
-            "billing": "billing",
-            "account": "account",
+            "billing":   "billing",
+            "account":   "account",
             "technical": "technical",
-            "fallback": "fallback",
+            "fallback":  "fallback",
         },
     )
 
-    g.add_edge("billing", END)
-    g.add_edge("account", END)
+    # All topic/fallback nodes terminate
+    g.add_edge("billing",   END)
+    g.add_edge("account",   END)
     g.add_edge("technical", END)
-    g.add_edge("fallback", END)
+    g.add_edge("fallback",  END)
 
     return g.compile()
 
 
-_graph = None
+graph = build_graph()
 
 
-@app.on_startup
-async def init():
-    global _graph
-    _graph = build_graph()
-    logger.info("FAQ router graph compiled")
-
-
-# ── Entrypoint ────────────────────────────────────────────────────────────────
+# ── Entrypoint ─────────────────────────────────────────────────────────────
 @app.entrypoint
 async def invoke(
     messages: list,
@@ -299,29 +280,23 @@ async def invoke(
     session_id: str | None = None,
     streaming: bool = False,
 ) -> dict:
-    """Route a user question to the appropriate FAQ topic and return a canned answer."""
-    # Guard auth_context for None
+    """FAQ router agent — classifies the question and routes to the right answer."""
+    # Auth guard (no role requirement for FAQ, but guard for None)
     if auth_context:
-        logger.debug("Request from user_id=%s", auth_context.user_id)
-
-    global _graph
-    if _graph is None:
-        _graph = build_graph()
+        logger.info(
+            "Request from user_id=%s customer_id=%s",
+            auth_context.user_id,
+            auth_context.customer_id,
+        )
 
     lc_messages = to_lc_messages(messages)
-    initial_state: AgentState = {
-        "messages": lc_messages,
-        "topic": "",
-        "confidence": 0.0,
-        "answer": "",
-    }
+    config      = {"configurable": {"thread_id": session_id or "default"}}
 
-    # streaming parameter accepted but not used (out of scope per story)
-    result = await _graph.ainvoke(initial_state)
+    # Streaming parameter accepted but not required per story AC
+    result = await graph.ainvoke(
+        {"messages": lc_messages, "topic": "", "confidence": 0.0},
+        config=config,
+    )
 
-    answer = result.get("answer") or ""
-    if not answer and result.get("messages"):
-        last = result["messages"][-1]
-        answer = last.content if isinstance(last, BaseMessage) else last.get("content", "")
-
-    return {"content": answer, "role": "assistant"}
+    last_message = result["messages"][-1]
+    return {"content": last_message.content, "role": "assistant"}
