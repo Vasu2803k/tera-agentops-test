@@ -1,0 +1,21 @@
+# config.yaml — generated from Jira story TER-1219
+name: faq-router-langgraph-agent
+description: "Routes user FAQ questions to billing, account, or technical answer nodes using LangGraph conditional routing."
+framework: langgraph
+version: 1.0.0
+
+environment_variables:
+  LLM_MODEL: gpt-4o-mini
+  # Secrets injected at deploy time — never hardcode here:
+  # OPENAI_API_KEY: injected via runtime_secrets_config
+
+  # LiteLLM proxy (optional — route to Bedrock, Azure, Vertex)
+  LITELLM_BASE_URL: ""
+  LITELLM_API_KEY: ""
+  LITELLM_MODEL: ""
+
+  # Opik observability (optional)
+  ENABLE_OPIK_TRACING: "false"
+  OPIK_PROJECT_NAME: faq-router-langgraph-agent
+  OPIK_URL_OVERRIDE: ""
+  OPIK_API_KEY: ""
