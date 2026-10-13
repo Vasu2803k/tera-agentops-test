@@ -1,0 +1,6 @@
+# ui/requirements-ui.txt — extra packages needed by the Streamlit UI
+# The core agent dependencies are in ../requirements.txt
+# Install both:
+#   pip install -r requirements.txt -r ui/requirements-ui.txt
+
+streamlit>=1.35
