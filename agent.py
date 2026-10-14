@@ -1,12 +1,12 @@
-# agent.py — generated from Jira story TER-1219
+# agent.py  — generated from Jira story TER-1219
 from __future__ import annotations
 
 import os
 import logging
 from typing import Annotated, TypedDict
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 
@@ -22,80 +22,82 @@ app = AgentRuntimeApp()
 LITELLM_BASE  = os.getenv("LITELLM_BASE_URL")
 LITELLM_KEY   = os.getenv("LITELLM_API_KEY", "sk-1234")
 LITELLM_MODEL = os.getenv("LITELLM_MODEL")
-model_name    = LITELLM_MODEL or os.getenv("LLM_MODEL", "gpt-4o-mini")
 
+model_name = LITELLM_MODEL or os.getenv("LLM_MODEL", "gpt-4o-mini")
 llm_kwargs: dict = {"model": model_name}
 if LITELLM_BASE:
     llm_kwargs.update({"base_url": LITELLM_BASE, "api_key": LITELLM_KEY})
 llm = ChatOpenAI(**llm_kwargs)
 
-# ── FAQ maps (in-code, no external services) ─────────────────────────────────
+# ── FAQ knowledge base ───────────────────────────────────────────────────────
 FAQ: dict[str, dict[str, str]] = {
     "billing": {
-        "How do I update my payment method?": (
-            "Log in to your account, navigate to Billing > Payment Methods, "
-            "and click 'Add / Replace Card'."
+        "how do i update my payment method": (
+            "To update your payment method, go to Account Settings → Billing → "
+            "Payment Methods and click 'Edit'."
         ),
-        "Why was I charged twice?": (
-            "Duplicate charges are usually reversed within 3-5 business days. "
-            "If not, please contact billing support with your invoice number."
+        "why was i charged twice": (
+            "Duplicate charges are usually caused by a failed retry. Please "
+            "contact support@example.com with your invoice number and we'll "
+            "resolve it within 1 business day."
         ),
-        "How do I download my invoice?": (
-            "Go to Billing > Invoices, select the period you need, "
-            "and click 'Download PDF'."
+        "how do i get a refund": (
+            "Refunds for unused time are processed within 5-7 business days. "
+            "Submit a request at support.example.com/refunds."
         ),
     },
     "account": {
-        "How do I reset my password?": (
-            "Click 'Forgot Password' on the login page and follow the "
-            "email instructions to set a new password."
+        "how do i reset my password": (
+            "Click 'Forgot Password' on the login page and enter your email. "
+            "You'll receive a reset link within 5 minutes."
         ),
-        "How do I update my email address?": (
-            "Go to Account Settings > Profile and change the email field. "
-            "A verification link will be sent to the new address."
+        "how do i change my email address": (
+            "Go to Account Settings → Profile → Contact Info and update your "
+            "email. A verification link will be sent to the new address."
         ),
-        "How do I delete my account?": (
-            "Visit Account Settings > Danger Zone and click 'Delete Account'. "
-            "This action is irreversible — all data will be removed within 30 days."
+        "how do i delete my account": (
+            "To permanently delete your account, navigate to Account Settings → "
+            "Security → Delete Account. This action is irreversible."
         ),
     },
     "technical": {
-        "How do I reset my API key?": (
-            "Navigate to Developer Settings > API Keys, revoke the current key, "
-            "and generate a new one. Update your integrations with the new key."
+        "why is the app slow": (
+            "App slowness is often caused by a poor network connection or "
+            "an outdated app version. Try refreshing or updating to the latest release."
         ),
-        "Why is my integration returning 401 errors?": (
-            "A 401 error means your API key is invalid or expired. "
-            "Regenerate your key in Developer Settings and redeploy your integration."
+        "how do i report a bug": (
+            "Please report bugs via our GitHub Issues page or email "
+            "bugs@example.com with steps to reproduce and a screenshot."
         ),
-        "How do I enable SSO?": (
-            "SSO is available on Enterprise plans. Contact your account manager "
-            "or open a support ticket to initiate the SSO setup workflow."
+        "the app wont load": (
+            "Try clearing your browser cache (Ctrl+Shift+Delete), disabling "
+            "browser extensions, or switching to an incognito window."
         ),
     },
 }
 
-FALLBACK_RESPONSE = (
-    "I can help with **billing**, **account**, or **technical** questions. "
-    "Could you rephrase your question under one of those topics?"
-)
-
 TOPICS = list(FAQ.keys())  # ["billing", "account", "technical"]
 
-# ── State ─────────────────────────────────────────────────────────────────────
+# ── State ────────────────────────────────────────────────────────────────────
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
-    topic: str          # classified topic name (or "fallback")
+    topic: str          # classified topic name
     confidence: float   # classifier confidence 0.0–1.0
+    answer: str         # final answer text
 
 
-# ── Helper: convert dicts → LangChain messages ───────────────────────────────
-def to_lc(messages: list) -> list[BaseMessage]:
+# ── Message conversion utility ───────────────────────────────────────────────
+def to_lc_messages(messages: list) -> list[BaseMessage]:
     result: list[BaseMessage] = []
     for m in messages:
-        role    = m.get("role", "user") if isinstance(m, dict) else "user"
-        content = m.get("content", "")  if isinstance(m, dict) else str(m)
-        if role == "assistant":
+        if not isinstance(m, dict):
+            result.append(HumanMessage(content=str(m)))
+            continue
+        role    = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "user":
+            result.append(HumanMessage(content=content))
+        elif role == "assistant":
             result.append(AIMessage(content=content))
         elif role == "system":
             result.append(SystemMessage(content=content))
@@ -104,98 +106,114 @@ def to_lc(messages: list) -> list[BaseMessage]:
     return result
 
 
-# ── Node 1: classifier ────────────────────────────────────────────────────────
-_CLASSIFIER_SYSTEM = """You are a FAQ router. Classify the user's question into exactly one
-of the following topics: billing, account, technical.
-If it does not fit any topic, reply with: fallback
-
-You MUST reply in this exact JSON format and nothing else:
-{"topic": "<billing|account|technical|fallback>", "confidence": <0.0-1.0>}"""
-
-
+# ── Nodes ────────────────────────────────────────────────────────────────────
 def classify(state: AgentState) -> dict:
-    """Classify the latest user message into a topic + confidence."""
-    import json
+    """Use the LLM to classify the user's question into a topic + confidence."""
+    user_question = state["messages"][-1].content
 
-    user_msg = state["messages"][-1].content if state["messages"] else ""
+    system_prompt = (
+        "You are a question classifier. Given a user question, decide which support "
+        "topic it belongs to: billing, account, or technical.\n"
+        "If none fits, output 'unknown'.\n"
+        "Respond with EXACTLY two lines:\n"
+        "TOPIC: <billing|account|technical|unknown>\n"
+        "CONFIDENCE: <float between 0.0 and 1.0>\n"
+        "No other text."
+    )
+
     response = llm.invoke([
-        SystemMessage(content=_CLASSIFIER_SYSTEM),
-        HumanMessage(content=user_msg),
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_question),
     ])
-    try:
-        parsed = json.loads(response.content.strip())
-        topic      = parsed.get("topic", "fallback")
-        confidence = float(parsed.get("confidence", 0.0))
-        if topic not in TOPICS:
-            topic = "fallback"
-    except (json.JSONDecodeError, ValueError, KeyError):
-        topic      = "fallback"
-        confidence = 0.0
 
-    logger.info("Classified as '%s' (confidence=%.2f)", topic, confidence)
+    topic      = "unknown"
+    confidence = 0.5
+    for line in response.content.strip().splitlines():
+        line = line.strip()
+        if line.upper().startswith("TOPIC:"):
+            raw = line.split(":", 1)[1].strip().lower()
+            if raw in TOPICS:
+                topic = raw
+            else:
+                topic = "unknown"
+        elif line.upper().startswith("CONFIDENCE:"):
+            try:
+                confidence = float(line.split(":", 1)[1].strip())
+            except ValueError:
+                confidence = 0.5
+
+    logger.info("Classified question as topic=%s confidence=%.2f", topic, confidence)
     return {"topic": topic, "confidence": confidence}
 
 
-# ── Node 2a-c: topic answer nodes ─────────────────────────────────────────────
-def _answer_from_faq(topic: str, user_msg: str, confidence: float) -> str:
-    """Return the best-matching FAQ answer for the given topic."""
-    faq_map = FAQ[topic]
-    # Simple keyword overlap to pick the best entry
-    user_lower = user_msg.lower()
-    best_key   = max(faq_map, key=lambda q: sum(w in user_lower for w in q.lower().split()))
-    return (
-        f"{faq_map[best_key]}\n\n"
-        f"_(Topic: **{topic}** — confidence {confidence:.0%})_"
-    )
+def _faq_answer(topic: str, question: str) -> str:
+    """Look up the best FAQ answer for a given topic and question."""
+    faq_map = FAQ.get(topic, {})
+    q_lower = question.lower()
+    # Exact keyword match first
+    for key, answer in faq_map.items():
+        if key in q_lower or any(word in q_lower for word in key.split()):
+            return answer
+    # Default to first answer in the topic if no close match
+    if faq_map:
+        return next(iter(faq_map.values()))
+    return "I'm sorry, I don't have a specific answer for that."
 
 
-def billing_node(state: AgentState) -> dict:
-    """Return a billing FAQ answer."""
-    user_msg = state["messages"][-1].content
-    answer   = _answer_from_faq("billing", user_msg, state["confidence"])
-    return {"messages": [AIMessage(content=answer)]}
+def handle_billing(state: AgentState) -> dict:
+    """Return a billing-related FAQ answer."""
+    question = state["messages"][-1].content
+    answer   = _faq_answer("billing", question)
+    return {"answer": answer}
 
 
-def account_node(state: AgentState) -> dict:
-    """Return an account FAQ answer."""
-    user_msg = state["messages"][-1].content
-    answer   = _answer_from_faq("account", user_msg, state["confidence"])
-    return {"messages": [AIMessage(content=answer)]}
+def handle_account(state: AgentState) -> dict:
+    """Return an account-related FAQ answer."""
+    question = state["messages"][-1].content
+    answer   = _faq_answer("account", question)
+    return {"answer": answer}
 
 
-def technical_node(state: AgentState) -> dict:
-    """Return a technical FAQ answer."""
-    user_msg = state["messages"][-1].content
-    answer   = _answer_from_faq("technical", user_msg, state["confidence"])
-    return {"messages": [AIMessage(content=answer)]}
+def handle_technical(state: AgentState) -> dict:
+    """Return a technical-related FAQ answer."""
+    question = state["messages"][-1].content
+    answer   = _faq_answer("technical", question)
+    return {"answer": answer}
 
 
-# ── Node 3: fallback ──────────────────────────────────────────────────────────
-def fallback_node(state: AgentState) -> dict:
-    """Return a polite fallback with detected confidence."""
+def handle_fallback(state: AgentState) -> dict:
+    """Polite fallback for unrecognized questions."""
     confidence = state.get("confidence", 0.0)
     answer = (
-        f"{FALLBACK_RESPONSE}\n\n"
-        f"_(Detected intent confidence: {confidence:.0%})_"
+        f"I can help with billing, account, or technical questions. "
+        f"Your question didn't clearly match any of those topics "
+        f"(detected intent confidence: {confidence:.0%}). "
+        f"Could you please rephrase or choose one of the supported topics?"
     )
-    return {"messages": [AIMessage(content=answer)]}
+    return {"answer": answer}
+
+
+def format_response(state: AgentState) -> dict:
+    """Wrap the answer as an AIMessage for the messages list."""
+    return {"messages": [AIMessage(content=state["answer"])]}
 
 
 # ── Routing function ──────────────────────────────────────────────────────────
 def route_topic(state: AgentState) -> str:
-    """Conditional edge: return the node name to route to."""
-    return state.get("topic", "fallback")
+    """Conditional edge: route to the appropriate topic handler."""
+    return state.get("topic", "unknown")
 
 
-# ── Graph assembly ────────────────────────────────────────────────────────────
+# ── Graph ────────────────────────────────────────────────────────────────────
 def build_graph() -> StateGraph:
     g = StateGraph(AgentState)
 
-    g.add_node("classify",  classify)
-    g.add_node("billing",   billing_node)
-    g.add_node("account",   account_node)
-    g.add_node("technical", technical_node)
-    g.add_node("fallback",  fallback_node)
+    g.add_node("classify",         classify)
+    g.add_node("billing",          handle_billing)
+    g.add_node("account",          handle_account)
+    g.add_node("technical",        handle_technical)
+    g.add_node("fallback",         handle_fallback)
+    g.add_node("format_response",  format_response)
 
     g.set_entry_point("classify")
 
@@ -206,14 +224,15 @@ def build_graph() -> StateGraph:
             "billing":   "billing",
             "account":   "account",
             "technical": "technical",
-            "fallback":  "fallback",
+            "unknown":   "fallback",
         },
     )
 
-    g.add_edge("billing",   END)
-    g.add_edge("account",   END)
-    g.add_edge("technical", END)
-    g.add_edge("fallback",  END)
+    g.add_edge("billing",   "format_response")
+    g.add_edge("account",   "format_response")
+    g.add_edge("technical", "format_response")
+    g.add_edge("fallback",  "format_response")
+    g.add_edge("format_response", END)
 
     return g.compile()
 
@@ -221,7 +240,7 @@ def build_graph() -> StateGraph:
 graph = build_graph()
 
 
-# ── Entrypoint ────────────────────────────────────────────────────────────────
+# ── Entrypoint ───────────────────────────────────────────────────────────────
 @app.entrypoint
 async def invoke(
     messages: list,
@@ -229,16 +248,20 @@ async def invoke(
     session_id: str | None = None,
     streaming: bool = False,
 ) -> dict:
-    """AgentRuntime entrypoint for the FAQ router agent."""
-    # Guard auth_context (may be None for unauthenticated requests)
-    if auth_context:
-        logger.info("Request from user_id=%s", auth_context.user_id)
+    """FAQ router entrypoint — classifies and routes user questions."""
+    if auth_context and auth_context.has_role("admin"):
+        logger.info("Request from admin user: %s", auth_context.user_id)
 
-    lc_messages = to_lc(messages)
+    lc_messages = to_lc_messages(messages)
+    initial_state: AgentState = {
+        "messages":   lc_messages,
+        "topic":      "",
+        "confidence": 0.0,
+        "answer":     "",
+    }
+
     config = {"configurable": {"thread_id": session_id or "default"}}
+    result = await graph.ainvoke(initial_state, config=config)
 
-    result = await graph.ainvoke(
-        {"messages": lc_messages, "topic": "", "confidence": 0.0},
-        config=config,
-    )
-    return {"content": result["messages"][-1].content, "role": "assistant"}
+    final_message = result["messages"][-1]
+    return {"content": final_message.content, "role": "assistant"}
