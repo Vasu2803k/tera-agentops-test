@@ -1,0 +1,39 @@
+# Agent configuration — TER-1219 FAQ Router
+# Compatible with AgentOps AgentRuntime
+
+name: faq-router-agent
+description: >-
+  LangGraph FAQ router that classifies user questions into billing, account,
+  or technical topics and returns concise canned answers. Unrecognised
+  questions receive a polite fallback with the detected intent confidence.
+framework: langgraph
+version: "1.0.0"
+
+environment_variables:
+  # LLM access — override at deployment time via AgentOps secret/runtime config
+  LITELLM_MODEL: "gpt-4o-mini"
+  LITELLM_API_KEY: "${SECRET:llm-api-key}"
+  # Optional: set to your LiteLLM proxy base URL (e.g. TD AI Studio ModelHub)
+  # LITELLM_BASE_URL: "http://litellm.aiwb.svc.cluster.local:4000/one-td/litellm"
+
+io_schema:
+  input:
+    type: object
+    properties:
+      message:
+        type: string
+        description: "User question to classify and answer."
+      session_id:
+        type: string
+        description: "Optional conversation session identifier."
+    required:
+      - message
+  output:
+    type: object
+    properties:
+      content:
+        type: string
+        description: "Canned FAQ answer for the detected topic."
+      role:
+        type: string
+        enum: ["assistant"]
